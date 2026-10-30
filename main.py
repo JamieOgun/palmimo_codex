@@ -17,8 +17,10 @@ turn, dance, nod, look, show a face, ...) is registered on the agent as a
 client tool when the app starts, and its calls run on the robot here. See
 robot_tools.py.
 
-With ``--coding-workdir`` set, the agent can also run coding tasks with Codex
-on the repos cloned into that folder on the robot. When a task finishes, the
+With ``--coding-workdir`` set, the agent can also run coding tasks with Codex.
+With a ``GITHUB_TOKEN``, it works on your GitHub repos by name: they are
+cloned into that folder as needed, and each task's changes are pushed to a
+branch with a pull request (github_repos.py). When a task finishes, the
 robot wakes by itself (if asleep) and the agent says so. See coding_tools.py.
 
 The mic is muted while the robot is talking. Without a ReSpeaker there is no
@@ -56,12 +58,14 @@ from palmimo_sdk.robot import Palmimo
 
 import coding_tools
 from coding_tools import Announcement, CodexRunner
+from github_repos import GitHubRepos
 from robot_tools import PROMPT_LINES, ToolRunner, build_toolset, client_tool_configs, sync_tools
 from wake import SAMPLE_RATE as WAKE_RATE
 from wake import NameWakeDetector, WakeDetector, WakeEvent
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
+GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 SIGNED_URL = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={agent_id}"
 
 #: Mic chunk length sent to the agent.
@@ -439,11 +443,19 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     if args.coding_workdir:
         workdir = Path(args.coding_workdir).expanduser()
         workdir.mkdir(parents=True, exist_ok=True)
+        token = os.environ.get(GITHUB_TOKEN_ENV)
+        github = GitHubRepos(token, workdir) if token else None
         codex = CodexRunner(
-            workdir, announcements, model=args.codex_model, sandbox=args.codex_sandbox, network=not args.no_codex_network
+            workdir,
+            announcements,
+            model=args.codex_model,
+            sandbox=args.codex_sandbox,
+            network=not args.no_codex_network,
+            github=github,
         )
-        repos = codex.repos()
-        logger.info("coding with Codex in %s (repos: %s)", workdir, ", ".join(repos) or "none; git clone some there")
+        repos = await codex.repos()
+        source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
+        logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
         configs += coding_tools.tool_configs(repos)
         prompt_lines = PROMPT_LINES + coding_tools.PROMPT_LINES
         handlers = coding_tools.handlers(codex)

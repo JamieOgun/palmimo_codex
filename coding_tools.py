@@ -2,8 +2,10 @@
 
 The agent gets four client tools: start, check, follow up and cancel a coding
 task. They drive Codex through its official Python SDK (``openai-codex``,
-which ships the Codex binary). Tasks run in repos cloned into one folder on
-the robot (``--coding-workdir``); each subfolder is a repo the agent can name.
+which ships the Codex binary). Tasks run in repos in one folder on the robot
+(``--coding-workdir``). With a GitHub token, github_repos.py fills that folder
+by itself and pushes each task's changes; without one, each git repo already
+in the folder is a repo the agent can name.
 
 Codex works inside its sandbox (``workspace-write`` by default: it can edit
 files in the repo and run commands, with network access unless
@@ -27,7 +29,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from openai_codex import ApprovalMode, AsyncCodex, Sandbox
+from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
+
+from github_repos import GitHubRepos, RepoError
 
 logger = logging.getLogger("coding_tools")
 
@@ -41,10 +45,11 @@ CODEX_INSTRUCTIONS = (
 
 PROMPT_LINES = (
     (
-        "You can run coding tasks with Codex on repos stored on this robot: start_coding_task, coding_task_status, "
+        "You can run coding tasks with Codex on the user's repos: start_coding_task, coding_task_status, "
         "continue_coding_task and cancel_coding_task. Pass the user's request on in their words, in English. "
         "Tasks take a minute or more: after starting one, confirm in a few words and let the user go. "
-        "You will be told when it finishes."
+        "You will be told when it finishes. Changes are pushed to a new branch with a pull request, never to the "
+        "main branch."
     ),
     (
         "When you report on code, never read code, file paths, commands or diffs aloud: say the outcome in one "
@@ -85,6 +90,11 @@ class Task:
     ended: float | None = None
     progress: str = "starting"
     summary: str = ""
+    #: The first request of this task chain; titles the commit and pull request.
+    title: str = ""
+
+    def __post_init__(self) -> None:
+        self.title = self.title or self.task
 
     def status_text(self) -> str:
         elapsed = round((self.ended or time.monotonic()) - self.started)
@@ -110,7 +120,12 @@ def describe_item(item: Any) -> str | None:
 
 
 class CodexRunner:
-    """One Codex task at a time; the Codex process starts with the first task."""
+    """One Codex task at a time; the Codex process starts with the first task.
+
+    With *github*, repos are found on GitHub by name, cloned or updated before
+    each task, and every task's changes are pushed to a branch with a pull
+    request. Without it, repos are the folders already in *workdir*.
+    """
 
     def __init__(
         self,
@@ -119,16 +134,18 @@ class CodexRunner:
         model: str | None = None,
         sandbox: str = "workspace-write",
         network: bool = True,
+        github: GitHubRepos | None = None,
     ) -> None:
         self.workdir = workdir
+        self.github = github
         self._announcements = announcements
         self._model = model or None
         self._sandbox = Sandbox(sandbox)
         self._config = {
-            # Lets commands inside the workspace-write sandbox use the network (git push, installs).
+            # Lets commands inside the workspace-write sandbox use the network (installs, fetches).
             "sandbox_workspace_write": {"network_access": network},
             # Commands Codex runs see only basic variables (HOME, PATH, USER, ...), never the
-            # robot's API keys, which this process holds.
+            # robot's API keys or GitHub token, which this process holds.
             "shell_environment_policy": {"inherit": "core", "exclude": ["*KEY*", "*SECRET*", "*TOKEN*"]},
         }
         #: Held from the busy check until the task is registered, so two calls can't both start one.
@@ -139,11 +156,18 @@ class CodexRunner:
         self._thread: Any = None  # the last task's AsyncThread, for follow-ups
         self._turn: Any = None  # the running AsyncTurnHandle
         self._job: asyncio.Task[None] | None = None
+        #: Where the last task ran: (repo path, branch or None).
+        self._where: tuple[Path, str | None] | None = None
 
-    def repos(self) -> list[str]:
+    def local_repos(self) -> list[str]:
         if not self.workdir.is_dir():
             return []
-        return sorted(p.name for p in self.workdir.iterdir() if p.is_dir() and not p.name.startswith("."))
+        return sorted(p.name for p in self.workdir.iterdir() if (p / ".git").exists())
+
+    async def repos(self) -> list[str]:
+        """Repo names to offer the agent (at most 30)."""
+        names = await self.github.names() if self.github else self.local_repos()
+        return names[:30]
 
     @property
     def busy(self) -> bool:
@@ -159,7 +183,9 @@ class CodexRunner:
     async def _client(self) -> AsyncCodex:
         async with self._lock:
             if self._codex is None:
-                codex = AsyncCodex()
+                # Codex itself never needs these; blank them so they don't reach its process.
+                hidden = {name: "" for name in ("GITHUB_TOKEN", "ELEVENLABS_API_KEY")}
+                codex = AsyncCodex(CodexConfig(env=hidden))
                 await codex.__aenter__()
                 account = await codex.account()
                 if account.account is None:
@@ -172,23 +198,69 @@ class CodexRunner:
                 self._codex = codex
             return self._codex
 
-    def _repo_path(self, name: str | None) -> tuple[str, Path]:
-        repos = self.repos()
+    def _local_repo(self, name: str | None) -> tuple[str, Path]:
+        repos = self.local_repos()
         name = (name or "").strip()
         if not name and len(repos) == 1:
             name = repos[0]
         if name not in repos:
             choices = ", ".join(repos) if repos else "none yet"
-            raise TaskError(f"I can only work in the repos cloned on the robot: {choices}.")
+            raise TaskError(f"I can only work in the repos on the robot: {choices}.")
         return name, self.workdir / name
 
     async def start(self, task: str, repo: str | None) -> Task:
         async with self._start_lock:
             if self.busy:
                 raise TaskError("Another coding task is still running; wait for it or cancel it.")
-            name, path = self._repo_path(repo)
+            if self.github:
+                try:
+                    remote = await self.github.find(repo)
+                except RepoError as exc:
+                    raise TaskError(str(exc)) from exc
+                name = remote.name
+            else:
+                name, _ = self._local_repo(repo)
+            self._current = current = Task(task=task, repo=name, progress="getting the repo ready")
+            self._job = asyncio.create_task(self._start_job(current, repo))
+            logger.info("codex task in %s: %s", name, task)
+            return current
+
+    async def follow_up(self, message: str) -> Task:
+        async with self._start_lock:
+            if self._current is None or self._thread is None or self._where is None:
+                raise TaskError("There is no coding task to continue; start one first.")
+            if self.busy:
+                if self._turn is None:
+                    raise TaskError("Codex is still getting started; try again in a moment.")
+                await self._turn.steer(message)
+                self._current.progress = "taking your follow-up into account"
+                return self._current
+            self._current = current = Task(task=message, repo=self._current.repo, title=self._current.title)
+            self._job = asyncio.create_task(self._turn_job(current, message))
+            logger.info("codex follow-up in %s: %s", current.repo, message)
+            return current
+
+    async def cancel(self) -> None:
+        if not self.busy:
+            raise TaskError("No coding task is running.")
+        if self._turn is not None:
+            await self._turn.interrupt()
+        elif self._job is not None:
+            self._job.cancel()
+
+    def status(self) -> str:
+        return self._current.status_text() if self._current else "No coding task has run yet."
+
+    async def _start_job(self, task: Task, spoken: str | None) -> None:
+        try:
+            if self.github:
+                name, path, branch = await self.github.prepare(spoken, task.task)
+            else:
+                name, path = self._local_repo(spoken)
+                branch = None
+            self._where = (path, branch)
             codex = await self._client()
-            thread = await codex.thread_start(
+            self._thread = await codex.thread_start(
                 cwd=str(path),
                 sandbox=self._sandbox,
                 approval_mode=ApprovalMode.deny_all,
@@ -196,37 +268,20 @@ class CodexRunner:
                 model=self._model,
                 config=self._config,
             )
-            return await self._run(thread, task, name)
+        except asyncio.CancelledError:
+            self._finish(task, "cancelled", "Cancelled.")
+            raise
+        except Exception as exc:  # noqa: BLE001 -- clone, network or Codex start-up failures: tell the user
+            logger.exception("could not start the coding task")
+            self._finish(task, "failed", f"Could not start: {exc}")
+            return
+        await self._turn_job(task, task.task)
 
-    async def follow_up(self, message: str) -> Task:
-        async with self._start_lock:
-            if self._current is None or self._thread is None:
-                raise TaskError("There is no coding task to continue; start one first.")
-            if self.busy and self._turn is not None:
-                await self._turn.steer(message)
-                self._current.progress = "taking your follow-up into account"
-                return self._current
-            return await self._run(self._thread, message, self._current.repo)
-
-    async def cancel(self) -> None:
-        if not self.busy or self._turn is None:
-            raise TaskError("No coding task is running.")
-        await self._turn.interrupt()
-
-    def status(self) -> str:
-        return self._current.status_text() if self._current else "No coding task has run yet."
-
-    async def _run(self, thread: Any, prompt: str, repo: str) -> Task:
-        self._thread = thread
-        self._current = task = Task(task=prompt, repo=repo)
-        self._turn = await thread.turn(prompt)
-        self._job = asyncio.create_task(self._follow(task, self._turn))
-        logger.info("codex started in %s: %s", repo, prompt)
-        return task
-
-    async def _follow(self, task: Task, turn: Any) -> None:
+    async def _turn_job(self, task: Task, prompt: str) -> None:
         last_text = ""
+        turn = None
         try:
+            turn = self._turn = await self._thread.turn(prompt)
             async for event in turn.stream():
                 if event.method in ("item/started", "item/completed"):
                     item = getattr(event.payload.item, "root", event.payload.item)
@@ -249,11 +304,34 @@ class CodexRunner:
             logger.exception("codex task failed")
             task.state, task.summary = "failed", f"Codex stopped with an error: {exc}"
         finally:
-            if task.state == "running":
-                task.state, task.summary = "failed", task.summary or "Codex ended without a result."
-            task.ended = time.monotonic()
             if self._turn is turn:
                 self._turn = None
+        if task.state == "done" and self.github and self._where and self._where[1]:
+            task.progress = "pushing"
+            task.summary += " " + await self._publish(task)
+        self._finish(task, task.state if task.state != "running" else "failed", task.summary)
+
+    async def _publish(self, task: Task) -> str:
+        """Push the task's branch; a sentence saying what happened, for the announcement."""
+        assert self.github and self._where
+        path, branch = self._where
+        assert branch
+        try:
+            published = await self.github.publish(task.repo, path, branch, task.title, task.summary)
+        except RepoError as exc:
+            logger.warning("could not push: %s", exc)
+            return f"(The changes are on the robot, but pushing failed: {exc})"
+        if published is None:
+            return "(No files changed, so nothing was pushed.)"
+        if published.pr_url and published.pr_new:
+            return f"(Pushed and opened a pull request: {published.pr_url})"
+        if published.pr_url:
+            return f"(Pushed to the open pull request: {published.pr_url})"
+        return f"(Pushed to branch {published.branch}.)"
+
+    def _finish(self, task: Task, state: str, summary: str) -> None:
+        task.state, task.summary = state, summary or ("Done." if state == "done" else "Codex ended without a result.")
+        task.ended = time.monotonic()
         took = task.ended - task.started
         logger.info("codex %s in %s after %ds: %s", task.state, task.repo, took, task.summary[-200:])
         if task.state in ("done", "failed"):
@@ -288,7 +366,7 @@ def tool_configs(repos: list[str]) -> list[dict[str, Any]]:
             "the user asks for a change, fix, test, or question about their code.",
             {
                 "task": {"type": "string", "description": "What to do, in the user's words, in English."},
-                "repo": {"type": "string", "description": f"Which repo. Leave empty if there is only one.{repo_hint}"},
+                "repo": {"type": "string", "description": f"Which repo, by name as the user says it.{repo_hint}"},
             },
             ("task",),
         ),

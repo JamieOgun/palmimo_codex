@@ -76,7 +76,7 @@ type = "string"
 default = "~/code"
 pattern = "^[A-Za-z0-9~/._-]{0,128}$"
 max_length = 128
-description = "Folder on the robot with the git repos Codex may work in (each subfolder is a repo; git clone them there). Leave empty to turn coding off."
+description = "Folder on the robot where Codex works. With GITHUB_TOKEN set, your repos are cloned here automatically; without it, git clone them here yourself. Leave empty to turn coding off."
 
 [params.codex_model]
 type = "string"
@@ -106,3 +106,8 @@ help_url = "https://elevenlabs.io/app/settings/api-keys"
 required = true
 description = "OpenAI API key, used to hear the robot's name in nearby speech, and by Codex for coding tasks."
 help_url = "https://platform.openai.com/api-keys"
+
+[env.GITHUB_TOKEN]
+required = false
+description = "GitHub token so Codex can work on your repos by name: cloned automatically, changes pushed to a branch with a pull request. Needs Contents and Pull requests: read and write."
+help_url = "https://github.com/settings/personal-access-tokens/new"
