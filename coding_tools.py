@@ -124,8 +124,15 @@ class CodexRunner:
         self._announcements = announcements
         self._model = model or None
         self._sandbox = Sandbox(sandbox)
-        #: Lets commands inside the workspace-write sandbox use the network (git push, installs).
-        self._config = {"sandbox_workspace_write": {"network_access": network}}
+        self._config = {
+            # Lets commands inside the workspace-write sandbox use the network (git push, installs).
+            "sandbox_workspace_write": {"network_access": network},
+            # Commands Codex runs see only basic variables (HOME, PATH, USER, ...), never the
+            # robot's API keys, which this process holds.
+            "shell_environment_policy": {"inherit": "core", "exclude": ["*KEY*", "*SECRET*", "*TOKEN*"]},
+        }
+        #: Held from the busy check until the task is registered, so two calls can't both start one.
+        self._start_lock = asyncio.Lock()
         self._codex: AsyncCodex | None = None
         self._lock = asyncio.Lock()
         self._current: Task | None = None
@@ -176,28 +183,30 @@ class CodexRunner:
         return name, self.workdir / name
 
     async def start(self, task: str, repo: str | None) -> Task:
-        if self.busy:
-            raise TaskError("Another coding task is still running; wait for it or cancel it.")
-        name, path = self._repo_path(repo)
-        codex = await self._client()
-        thread = await codex.thread_start(
-            cwd=str(path),
-            sandbox=self._sandbox,
-            approval_mode=ApprovalMode.deny_all,
-            developer_instructions=CODEX_INSTRUCTIONS,
-            model=self._model,
-            config=self._config,
-        )
-        return await self._run(thread, task, name)
+        async with self._start_lock:
+            if self.busy:
+                raise TaskError("Another coding task is still running; wait for it or cancel it.")
+            name, path = self._repo_path(repo)
+            codex = await self._client()
+            thread = await codex.thread_start(
+                cwd=str(path),
+                sandbox=self._sandbox,
+                approval_mode=ApprovalMode.deny_all,
+                developer_instructions=CODEX_INSTRUCTIONS,
+                model=self._model,
+                config=self._config,
+            )
+            return await self._run(thread, task, name)
 
     async def follow_up(self, message: str) -> Task:
-        if self._current is None or self._thread is None:
-            raise TaskError("There is no coding task to continue; start one first.")
-        if self.busy and self._turn is not None:
-            await self._turn.steer(message)
-            self._current.progress = "taking your follow-up into account"
-            return self._current
-        return await self._run(self._thread, message, self._current.repo)
+        async with self._start_lock:
+            if self._current is None or self._thread is None:
+                raise TaskError("There is no coding task to continue; start one first.")
+            if self.busy and self._turn is not None:
+                await self._turn.steer(message)
+                self._current.progress = "taking your follow-up into account"
+                return self._current
+            return await self._run(self._thread, message, self._current.repo)
 
     async def cancel(self) -> None:
         if not self.busy or self._turn is None:
@@ -243,7 +252,8 @@ class CodexRunner:
             if task.state == "running":
                 task.state, task.summary = "failed", task.summary or "Codex ended without a result."
             task.ended = time.monotonic()
-            self._turn = None
+            if self._turn is turn:
+                self._turn = None
         took = task.ended - task.started
         logger.info("codex %s in %s after %ds: %s", task.state, task.repo, took, task.summary[-200:])
         if task.state in ("done", "failed"):
