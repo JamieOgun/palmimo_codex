@@ -6,9 +6,9 @@ folder the first time, and brought up to date before every task. Each task
 runs on its own branch, which this module commits and pushes when Codex is
 done, opening a pull request.
 
-The token never reaches Codex. It is sent as an HTTP header on each git
-command run here, so it is never stored in the clone's ``.git/config``, and
-Codex's own commands cannot read it.
+The token never reaches Codex or the folder it works in: only a separate bare
+mirror (in ~/.cache/palmimo/git-mirrors) talks to GitHub, with the token
+passed in git's environment for that one command. See the git section below.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import time
 import urllib.error
@@ -33,6 +34,18 @@ LIST_TTL_SECS = 600.0
 MAX_PAGES = 5
 #: Commits made here use this identity unless the robot's git config has one.
 GIT_IDENTITY = ("-c", "user.name=Palmimo", "-c", "user.email=palmimo@users.noreply.github.com")
+#: Set on every git command: no hooks, no repo-defined programs (fsmonitor,
+#: pager, external diff), and only https and local transports.
+SAFE_GIT_CONFIG = (
+    ("core.hooksPath", "/dev/null"),
+    ("core.fsmonitor", "false"),
+    ("core.pager", "cat"),
+    ("diff.external", ""),
+    ("protocol.allow", "never"),
+    ("protocol.https.allow", "always"),
+    ("protocol.file.allow", "always"),
+    ("credential.helper", ""),
+)
 
 
 class RepoError(Exception):
@@ -69,8 +82,9 @@ class GitHubRepos:
         self._workdir = workdir
         self._remotes: dict[str, Remote] = {}
         self._listed_at = 0.0
-        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        self._auth = ("-c", f"http.https://github.com/.extraheader=Authorization: Basic {basic}")
+        self._basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        #: Bare mirrors that talk to GitHub; outside the coding folder Codex works in.
+        self._mirrors = Path.home() / ".cache" / "palmimo" / "git-mirrors"
 
     # ---- GitHub API ----
 
@@ -119,11 +133,41 @@ class GitHubRepos:
             return []
 
     # ---- git ----
+    #
+    # Codex can write anything in its working tree, including .git/config and
+    # .git/hooks, so git never runs there with the token. Each repo also has a
+    # bare mirror outside the coding folder that only this module writes to:
+    # the mirror talks to GitHub (with the token), the working tree only talks
+    # to the mirror (without it). Every git command runs with hooks and
+    # repo-defined helpers off and a minimal environment, and uses explicit
+    # URLs and paths instead of remotes from a config file.
+
+    def _env(self, auth: bool) -> dict[str, str]:
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "LANG": "C.UTF-8",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        settings = list(SAFE_GIT_CONFIG)
+        if auth:
+            # In the environment, not argv, so other processes' `ps` can't see it.
+            settings.append(("http.https://github.com/.extraheader", f"Authorization: Basic {self._basic}"))
+        env["GIT_CONFIG_COUNT"] = str(len(settings))
+        for i, (key, value) in enumerate(settings):
+            env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
+        return env
 
     async def _git(self, cwd: Path, *args: str, auth: bool = False, check: bool = True) -> str:
-        argv = ["git", *(self._auth if auth else ()), *args]
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            "git",
+            *args,
+            cwd=cwd,
+            env=self._env(auth),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
         out, _ = await proc.communicate()
         text = out.decode(errors="replace").strip()
@@ -131,23 +175,40 @@ class GitHubRepos:
             raise RepoError(f"git {args[0]} failed: {text[-300:]}")
         return text
 
-    async def prepare(self, spoken: str | None, task: str) -> tuple[str, Path, str]:
-        """Find the repo, clone or update it, and check out a new task branch. Returns (name, path, branch)."""
-        remote = await self.find(spoken)
-        path = self._workdir / remote.name
-        if not (path / ".git").is_dir():
+    def _url(self, remote: Remote) -> str:
+        return f"https://github.com/{remote.full_name}.git"
+
+    def _mirror(self, remote: Remote) -> Path:
+        return self._mirrors / f"{remote.full_name.replace('/', '__')}.git"
+
+    async def _sync_mirror(self, remote: Remote) -> Path:
+        """The trusted bare mirror of *remote*, fetched from GitHub just now."""
+        mirror = self._mirror(remote)
+        url = self._url(remote)
+        if not mirror.is_dir():
+            self._mirrors.mkdir(parents=True, exist_ok=True)
             logger.info("cloning %s", remote.full_name)
-            url = f"https://github.com/{remote.full_name}.git"
-            await self._git(self._workdir, "clone", url, remote.name, auth=True)
+            await self._git(self._mirrors, "clone", "-q", "--bare", url, mirror.name, auth=True)
+        else:
+            await self._git(mirror, "fetch", "-q", "--prune", url, "+refs/heads/*:refs/heads/*", auth=True)
+        return mirror
+
+    async def prepare(self, spoken: str | None, task: str) -> tuple[str, Path, str]:
+        """Find the repo, bring it up to date, and check out a new task branch. Returns (name, path, branch)."""
+        remote = await self.find(spoken)
+        mirror = await self._sync_mirror(remote)
+        path = self._workdir / remote.name
+        base = remote.default_branch
+        if not (path / ".git").is_dir():
+            await self._git(self._workdir, "clone", "-q", "--branch", base, str(mirror), remote.name)
         else:
             if await self._git(path, "status", "--porcelain"):
                 await self._git(path, *GIT_IDENTITY, "stash", "push", "-u", "-m", "palmimo: left over from a task")
                 logger.info("stashed leftover changes in %s", remote.name)
-            await self._git(path, "fetch", "origin", auth=True)
-            await self._git(path, "checkout", remote.default_branch)
-            await self._git(path, "reset", "--hard", f"origin/{remote.default_branch}")
+            await self._git(path, "fetch", "-q", str(mirror), f"+refs/heads/{base}:refs/remotes/origin/{base}")
+            await self._git(path, "checkout", "-q", "-B", base, f"refs/remotes/origin/{base}")
         branch = f"palmimo/{time.strftime('%m%d-%H%M%S')}-{slug(task)}"
-        await self._git(path, "checkout", "-b", branch)
+        await self._git(path, "checkout", "-q", "-b", branch)
         return remote.name, path, branch
 
     async def find(self, spoken: str | None) -> Remote:
@@ -169,11 +230,15 @@ class GitHubRepos:
         remote = (await self.remotes())[normalize(name)]
         if await self._git(path, "status", "--porcelain"):
             await self._git(path, "add", "-A")
-            await self._git(path, *GIT_IDENTITY, "commit", "-q", "-m", title[:72], "-m", summary)
-        ahead = await self._git(path, "rev-list", "--count", f"origin/{remote.default_branch}..HEAD")
+            await self._git(path, *GIT_IDENTITY, "commit", "-q", "--no-verify", "-m", title[:72], "-m", summary)
+        ahead = await self._git(path, "rev-list", "--count", f"refs/remotes/origin/{remote.default_branch}..HEAD")
         if ahead == "0":
             return None
-        await self._git(path, "push", "-q", "-u", "origin", branch, auth=True)
+        # Bring the commits into the trusted mirror, then push from there.
+        mirror = self._mirror(remote)
+        await self._git(mirror, "fetch", "-q", str(path), f"+HEAD:refs/heads/{branch}")
+        url = self._url(remote)
+        await self._git(mirror, "push", "-q", "--no-verify", url, f"refs/heads/{branch}:refs/heads/{branch}", auth=True)
         owner = remote.full_name.split("/")[0]
         existing = await asyncio.to_thread(
             self._api, "GET", f"/repos/{remote.full_name}/pulls?head={owner}:{branch}&state=open"
