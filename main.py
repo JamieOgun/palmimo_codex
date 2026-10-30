@@ -453,6 +453,11 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
             network=not args.no_codex_network,
             github=github,
         )
+        if github and args.codex_sandbox == "full-access":
+            logger.warning(
+                "codex_sandbox is full-access: Codex can change anything on the robot, including the git setup "
+                "that keeps your GitHub token away from it. Use workspace-write unless you need more."
+            )
         repos = await codex.repos()
         source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
         logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")

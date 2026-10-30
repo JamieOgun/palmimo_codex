@@ -45,6 +45,11 @@ SAFE_GIT_CONFIG = (
     ("protocol.https.allow", "always"),
     ("protocol.file.allow", "always"),
     ("credential.helper", ""),
+    ("commit.gpgSign", "false"),
+    ("tag.gpgSign", "false"),
+    ("core.askPass", ""),
+    ("core.sshCommand", "false"),
+    ("core.attributesFile", "/dev/null"),
 )
 
 
@@ -134,8 +139,9 @@ class GitHubRepos:
 
     # ---- git ----
     #
-    # Codex can write anything in its working tree, including .git/config and
-    # .git/hooks, so git never runs there with the token. Each repo also has a
+    # Codex's workspace-write sandbox keeps .git read-only, but with
+    # full-access it could write .git/config and .git/hooks, so git never runs
+    # in the working tree with the token. Each repo also has a
     # bare mirror outside the coding folder that only this module writes to:
     # the mirror talks to GitHub (with the token), the working tree only talks
     # to the mirror (without it). Every git command runs with hooks and
