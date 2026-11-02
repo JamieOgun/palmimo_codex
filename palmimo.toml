@@ -12,7 +12,6 @@ command = [
   "--speaker-device", "{speaker_device}",
   "--mic-device", "{mic_device}",
   "--volume", "{volume}",
-  "--github-repos", "{github_repos}",
   "--codex-model", "{codex_model}",
 ]
 
@@ -45,13 +44,6 @@ default = 1.0
 min = 0.0
 max = 3.0
 description = "Output gain; 1.0 is the voice's own level."
-
-[params.github_repos]
-type = "string"
-default = ""
-pattern = "^[A-Za-z0-9._/:, -]{0,256}$"
-max_length = 256
-description = "Repos Codex may work on, comma-separated, e.g. JamieOgun/test_app_jamie, my-site. Use owner/repo, just the repo name, or the GitHub URL. Leave empty to allow every repo the GitHub token can see (or every repo already in ~/code on the robot without a token)."
 
 [params.codex_model]
 type = "string"

@@ -8,8 +8,7 @@ than spelling, so "Parmimo", "Parumimo" and パルミーモ all count.
 
 Only utterances (not silence) leave the robot, and nothing reaches ElevenLabs
 until the name is heard. Everything said near the robot does go to OpenAI,
-though; a fully on-device detector can replace :class:`NameWakeDetector`
-behind the :class:`WakeDetector` interface later.
+though.
 
 ``SileroVad`` and ``UtteranceSegmenter`` are copied from the devkit example's
 vad.py (Apache-2.0, Copyright 2026 Jizai Inc.), trimmed of test seams.
@@ -23,7 +22,7 @@ import logging
 import wave
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
 from palmimo_sdk import NameMatcher
@@ -171,14 +170,6 @@ class WakeEvent:
 
     command: str
     transcript: str
-
-
-class WakeDetector(Protocol):
-    """Anything that turns 16 kHz mono int16 audio into wake events."""
-
-    async def feed(self, chunk: np.ndarray) -> WakeEvent | None: ...
-
-    def reset(self) -> None: ...
 
 
 class NameWakeDetector:

@@ -81,39 +81,10 @@ def slug(text: str, limit: int = 40) -> str:
     return words[:limit].rstrip("-") or "task"
 
 
-def parse_allowed(text: str) -> list[str]:
-    """"me/app, other-repo" -> ["me/app", "other-repo"]: the repos Codex may use; [] means any.
-
-    Pasted GitHub URLs work too: "https://github.com/me/app.git" becomes "me/app".
-    """
-    entries = []
-    for part in text.split(","):
-        entry = re.sub(r"^(https?://)?(www\.)?github\.com/", "", part.strip(), flags=re.IGNORECASE)
-        entry = re.sub(r"\.git$", "", entry.strip("/")).strip("/")
-        if entry:
-            entries.append(entry)
-    return entries
-
-
-def is_allowed(name: str, full_name: str | None, allowed: list[str]) -> bool:
-    """True if *allowed* is empty or names this repo, as "owner/repo" or just "repo"."""
-    if not allowed:
-        return True
-    for entry in allowed:
-        if "/" in entry:
-            if full_name and entry.lower() == full_name.lower():
-                return True
-        elif normalize(entry) == normalize(name):
-            return True
-    return False
-
-
 class GitHubRepos:
-    def __init__(self, token: str, workdir: Path, allowed: list[str] | None = None) -> None:
+    def __init__(self, token: str, workdir: Path) -> None:
         self._token = token
         self._workdir = workdir
-        #: Repos Codex may use, as "owner/repo" or "repo"; empty means every repo the token can see.
-        self._allowed = allowed or []
         self._remotes: dict[str, Remote] = {}
         self._listed_at = 0.0
         self._basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -143,7 +114,7 @@ class GitHubRepos:
             raise RepoError(f"I can't reach GitHub ({exc}).") from exc
 
     async def remotes(self) -> dict[str, Remote]:
-        """Repos the token can see (only the allowed ones, if set), keyed by normalized name."""
+        """Repos the token can see, keyed by normalized name."""
         if self._remotes and time.monotonic() - self._listed_at < LIST_TTL_SECS:
             return self._remotes
         found: dict[str, Remote] = {}
@@ -152,23 +123,9 @@ class GitHubRepos:
             assert isinstance(batch, list)
             for repo in batch:
                 remote = Remote(repo["name"], repo["full_name"], repo.get("default_branch") or "main")
-                if is_allowed(remote.name, remote.full_name, self._allowed):
-                    found.setdefault(normalize(remote.name), remote)
+                found.setdefault(normalize(remote.name), remote)
             if len(batch) < 100:
                 break
-        # An "owner/repo" past the pages read above (or not in the listing) is looked up directly.
-        listed = {r.full_name.lower() for r in found.values()}
-        for entry in self._allowed:
-            if "/" not in entry or entry.lower() in listed:
-                continue
-            try:
-                repo = await asyncio.to_thread(self._api, "GET", f"/repos/{entry}")
-            except RepoError as exc:
-                logger.warning("allowed repo %s is not reachable with this token: %s", entry, exc)
-                continue
-            assert isinstance(repo, dict)
-            remote = Remote(repo["name"], repo["full_name"], repo.get("default_branch") or "main")
-            found.setdefault(normalize(remote.name), remote)
         self._remotes, self._listed_at = found, time.monotonic()
         return found
 
@@ -272,9 +229,6 @@ class GitHubRepos:
             return close[0]
         if close:
             raise RepoError("That matches several repos: " + ", ".join(r.name for r in close[:5]) + ".")
-        if self._allowed:
-            choices = ", ".join(r.name for r in remotes.values()) or "none reachable"
-            raise RepoError(f"I can only work on these repos: {choices}.")
         raise RepoError(f"I can't find a repo called {spoken} on your GitHub.")
 
     async def publish(self, name: str, path: Path, branch: str, title: str, summary: str) -> Published | None:

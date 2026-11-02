@@ -58,10 +58,10 @@ from palmimo_sdk.robot import Palmimo
 
 import coding_tools
 from coding_tools import Announcement, CodexRunner
-from github_repos import GitHubRepos, is_allowed, parse_allowed
+from github_repos import GitHubRepos
 from robot_tools import PROMPT_LINES, ToolRunner, build_toolset, client_tool_configs, sync_tools
 from wake import SAMPLE_RATE as WAKE_RATE
-from wake import NameWakeDetector, WakeDetector, WakeEvent
+from wake import NameWakeDetector, WakeEvent
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
@@ -252,15 +252,6 @@ def open_player(hint: str | None, rate: int, volume: float) -> Player | SoundDev
     return SoundDevicePlayer(find_device(hint, "output"), rate, volume)
 
 
-async def send_context(ws: websockets.ClientConnection, text: str) -> None:
-    """Tell the agent about something that happened around the robot, e.g. "Someone just waved at you."
-
-    The agent takes it into account on its next reply; it is not treated as
-    something the user said and does not make the agent speak by itself.
-    """
-    await ws.send(json.dumps({"type": "contextual_update", "text": text}))
-
-
 def chime(rate: int) -> bytes:
     """Two short rising notes, played the moment the robot hears its name."""
     notes = []
@@ -300,7 +291,7 @@ def drain(chunks: asyncio.Queue[bytes]) -> None:
 
 
 async def wait_for_wake(
-    detector: WakeDetector,
+    detector: NameWakeDetector,
     mic_chunks: asyncio.Queue[bytes],
     mic_rate: int,
     announcements: asyncio.Queue[Announcement],
@@ -450,15 +441,9 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     workdir = Path(CODING_WORKDIR).expanduser()
     workdir.mkdir(parents=True, exist_ok=True)
     token = os.environ.get(GITHUB_TOKEN_ENV)
-    allowed = parse_allowed(args.github_repos)
-    github = GitHubRepos(token, workdir, allowed) if token else None
-    codex = CodexRunner(workdir, announcements, model=args.codex_model, github=github, allowed=allowed)
+    github = GitHubRepos(token, workdir) if token else None
+    codex = CodexRunner(workdir, announcements, model=args.codex_model, github=github)
     repos = await codex.repos()
-    if allowed:
-        missing = [a for a in allowed if not any(is_allowed(r, None, [a.split("/")[-1]]) for r in repos)]
-        if missing:
-            where = "on GitHub" if github else f"in {workdir} (GITHUB_TOKEN is not set, so nothing is cloned)"
-            logger.warning("these github_repos were not found %s: %s", where, ", ".join(missing))
     source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
     logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
     configs += coding_tools.tool_configs(repos)
@@ -471,7 +456,7 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
         logger.warning("could not register the robot's tools on the agent: %s", exc)
 
     # Loads (and on first run downloads) the speech detector.
-    detector: WakeDetector = await asyncio.to_thread(NameWakeDetector, OpenAI(), STT_MODEL)
+    detector = await asyncio.to_thread(NameWakeDetector, OpenAI(), STT_MODEL)
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -527,11 +512,6 @@ def main() -> int:
     parser.add_argument("--speaker-device", default="ReSpeaker", help="Part of the speaker's card name in `aplay -l`")
     parser.add_argument("--mic-device", default="ReSpeaker", help="Part of the mic's name in `arecord -l`")
     parser.add_argument("--volume", type=float, default=1.0, help="Output gain; 1.0 is the voice's own level")
-    parser.add_argument(
-        "--github-repos",
-        default="",
-        help='Repos Codex may use, comma-separated, as "owner/repo" or "repo"; empty for any',
-    )
     parser.add_argument("--codex-model", default="", help="Codex model; empty for Codex's default")
     parser.add_argument(
         "--no-robot", action="store_true", help="Run the tools without motors or face display (for testing off the robot)"
