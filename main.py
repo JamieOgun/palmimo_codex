@@ -77,6 +77,10 @@ STT_MODEL = "gpt-4o-mini-transcribe"
 #: Folder on the robot where repos are cloned and Codex works.
 CODING_WORKDIR = "~/code"
 
+#: Resting head pitch in degrees: 0 looks straight ahead, positive tilts the gaze up (the SDK's default is 15,
+#: up to 20 either way).
+NECK_REST_PITCH_DEG = 0.0
+
 #: Face for each coding task state; None is the neutral face.
 TASK_FACES = {"running": "THINKING", "done": "HAPPY", "failed": "SAD", "cancelled": None}
 
@@ -206,7 +210,9 @@ def open_robot(with_hardware: bool) -> contextlib.AbstractContextManager[Palmimo
     from palmimo_sdk.io.display import FaceDisplay
     from palmimo_sdk.io.dynamixel import DynamixelDriver
 
-    return Palmimo(driver=DynamixelDriver(), display=FaceDisplay())
+    robot = Palmimo(driver=DynamixelDriver(), display=FaceDisplay())
+    robot.neck_rest_pitch_deg = NECK_REST_PITCH_DEG
+    return robot
 
 
 class SoundDevicePlayer:
