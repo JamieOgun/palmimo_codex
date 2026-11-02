@@ -137,9 +137,12 @@ class CodexRunner:
         announcements: asyncio.Queue[Announcement],
         model: str | None = None,
         github: GitHubRepos | None = None,
+        on_state: Callable[[str], None] | None = None,
     ) -> None:
         self.workdir = workdir
         self.github = github
+        #: Told each time a task starts (running) or ends (done, failed, cancelled); main.py sets the face.
+        self._on_state = on_state or (lambda state: None)
         self._announcements = announcements
         self._model = model or None
         self._config = {
@@ -223,6 +226,7 @@ class CodexRunner:
                 name, _ = self._local_repo(repo)
             self._current = current = Task(task=task, repo=name, progress="getting the repo ready")
             self._job = asyncio.create_task(self._start_job(current, repo))
+            self._on_state("running")
             logger.info("codex task in %s: %s", name, task)
             return current
 
@@ -238,6 +242,7 @@ class CodexRunner:
                 return self._current
             self._current = current = Task(task=message, repo=self._current.repo, title=self._current.title)
             self._job = asyncio.create_task(self._turn_job(current, message))
+            self._on_state("running")
             logger.info("codex follow-up in %s: %s", current.repo, message)
             return current
 
@@ -335,6 +340,7 @@ class CodexRunner:
         task.ended = time.monotonic()
         took = task.ended - task.started
         logger.info("codex %s in %s after %ds: %s", task.state, task.repo, took, task.summary[-200:])
+        self._on_state(task.state)
         if task.state in ("done", "failed"):
             self._announcements.put_nowait(Announcement(task.state, task.repo, task.summary))
 

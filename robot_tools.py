@@ -27,8 +27,24 @@ from typing import Any
 from palmimo_sdk.agent import AgentToolSet
 
 #: ``say`` would need a speaker of its own (the agent already talks), and
-#: ``capture`` returns a photo, which a client tool result cannot carry.
-EXCLUDED_TOOLS = ("say", "capture")
+#: ``capture`` returns a photo, which a client tool result cannot carry. The
+#: rest are left out to keep the agent's context small: walking (the robot sits
+#: on a desk), ``sleep``/``wake_up`` (poses easily confused with go_to_sleep),
+#: and gestures that others already cover.
+EXCLUDED_TOOLS = (
+    "say",
+    "capture",
+    "forward",
+    "backward",
+    "turn",
+    "strafe",
+    "creep",
+    "sleep",
+    "wake_up",
+    "pushup",
+    "stretch",
+    "wave_both",
+)
 
 #: Optional arguments every motion carries but that make no sense here: the
 #: agent speaks with its own voice, and ``reason`` is only for logs.
@@ -153,6 +169,9 @@ def sync_tools(
 ) -> None:
     """Make sure every config exists as a workspace tool, is current, and is attached to the agent.
 
+    Tools named in EXCLUDED_TOOLS are detached, so dropping one here also
+    drops it from the agent (it stays in the workspace, unused).
+
     Also appends any missing *prompt_lines* to the agent's prompt, enables
     skip_turn, and applies TURN_SETTINGS.
     """
@@ -175,7 +194,10 @@ def sync_tools(
     agent = _request("GET", f"/agents/{agent_id}", api_key)
     config = agent["conversation_config"]
     prompt = config["agent"]["prompt"]
+    retired = {existing[name]["id"] for name in EXCLUDED_TOOLS if name in existing}
     attached = prompt.get("tool_ids") or []
+    stale = [tool_id for tool_id in attached if tool_id in retired]
+    attached = [tool_id for tool_id in attached if tool_id not in retired]
     missing = [tool_id for tool_id in tool_ids if tool_id not in attached]
     text = prompt.get("prompt") or ""
     new_lines = [line for line in prompt_lines if line not in text]
@@ -184,7 +206,7 @@ def sync_tools(
     turn = config.get("turn") or {}
     needs_turn = not _same(turn, TURN_SETTINGS)
     needs_quiet_start = bool(config["agent"].get("first_message"))
-    if not missing and not new_lines and not needs_skip and not needs_turn and not needs_quiet_start:
+    if not missing and not stale and not new_lines and not needs_skip and not needs_turn and not needs_quiet_start:
         logger.info("agent is up to date: %d robot tools attached", len(tool_ids))
         return
     # Send the whole prompt and turn config back with only these fields
@@ -203,8 +225,9 @@ def sync_tools(
         body["turn"] = {**turn, **TURN_SETTINGS}
     _request("PATCH", f"/agents/{agent_id}", api_key, {"conversation_config": body})
     logger.info(
-        "updated the agent: %d tools attached, %d prompt lines added, skip_turn %s, turn settings %s, first message %s",
+        "updated the agent: %d tools attached, %d detached, %d prompt lines added, skip_turn %s, turn settings %s, first message %s",
         len(missing),
+        len(stale),
         len(new_lines),
         "enabled" if needs_skip else "present",
         "updated" if needs_turn else "current",

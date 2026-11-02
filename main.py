@@ -77,6 +77,9 @@ STT_MODEL = "gpt-4o-mini-transcribe"
 #: Folder on the robot where repos are cloned and Codex works.
 CODING_WORKDIR = "~/code"
 
+#: Face for each coding task state; None is the neutral face.
+TASK_FACES = {"running": "THINKING", "done": "HAPPY", "failed": "SAD", "cancelled": None}
+
 #: Mic chunk length sent to the agent.
 CHUNK_SECONDS = 0.05
 #: Keep the mic muted this long after the robot's last sample, to cover the
@@ -442,7 +445,14 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
     token = os.environ.get(GITHUB_TOKEN_ENV)
     github = GitHubRepos(token, workdir) if token else None
-    codex = CodexRunner(workdir, announcements, model=args.codex_model, github=github)
+    faces: set[asyncio.Task[None]] = set()  # keeps face changes alive until they finish
+
+    def task_face(state: str) -> None:
+        change = asyncio.create_task(show_face(robot, TASK_FACES.get(state)))
+        faces.add(change)
+        change.add_done_callback(faces.discard)
+
+    codex = CodexRunner(workdir, announcements, model=args.codex_model, github=github, on_state=task_face)
     repos = await codex.repos()
     source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
     logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
@@ -482,14 +492,16 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     )
     with mic:
         while not stop.is_set():
-            await show_face(robot, "SLEEP")
+            # While Codex works, keep the thinking face instead of sleeping.
+            await show_face(robot, "THINKING" if codex.busy else "SLEEP")
             logger.info("asleep; call me by name (Palmimo / パルミーモ)")
             woken = await wait_for_wake(detector, mic_chunks, mic_rate, announcements, stop)
             if woken is None:
                 break
             if isinstance(woken, Announcement):
-                logger.info("waking up for news from the laptop")
-            await show_face(robot, None)
+                logger.info("waking up to say a coding task ended")  # keeps the task's happy or sad face
+            else:
+                await show_face(robot, None)
             await play_chime(args)
             drain(mic_chunks)  # don't send the chime itself to the agent
             try:
