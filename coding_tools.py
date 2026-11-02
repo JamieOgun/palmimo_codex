@@ -31,7 +31,7 @@ from typing import Any
 
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
 
-from github_repos import GitHubRepos, RepoError
+from github_repos import GitHubRepos, RepoError, is_allowed
 
 logger = logging.getLogger("coding_tools")
 
@@ -135,9 +135,12 @@ class CodexRunner:
         sandbox: str = "workspace-write",
         network: bool = True,
         github: GitHubRepos | None = None,
+        allowed: list[str] | None = None,
     ) -> None:
         self.workdir = workdir
         self.github = github
+        #: Without GitHub, limits the local repos too (matched by folder name).
+        self._allowed = allowed or []
         self._announcements = announcements
         self._model = model or None
         self._sandbox = Sandbox(sandbox)
@@ -162,7 +165,11 @@ class CodexRunner:
     def local_repos(self) -> list[str]:
         if not self.workdir.is_dir():
             return []
-        return sorted(p.name for p in self.workdir.iterdir() if (p / ".git").exists())
+        return sorted(
+            p.name
+            for p in self.workdir.iterdir()
+            if (p / ".git").exists() and is_allowed(p.name, None, [a.split("/")[-1] for a in self._allowed])
+        )
 
     async def repos(self) -> list[str]:
         """Repo names to offer the agent (at most 30)."""

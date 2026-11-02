@@ -16,6 +16,7 @@ command = [
   "--max-session-secs", "{max_session_secs}",
   "--stt-model", "{stt_model}",
   "--coding-workdir", "{coding_workdir}",
+  "--github-repos", "{github_repos}",
   "--codex-model", "{codex_model}",
   "--codex-sandbox", "{codex_sandbox}",
   "{block_codex_network}",
@@ -77,6 +78,13 @@ default = "~/code"
 pattern = "^[A-Za-z0-9~/._-]{0,128}$"
 max_length = 128
 description = "Folder on the robot where Codex works. With GITHUB_TOKEN set, your repos are cloned here automatically; without it, git clone them here yourself. Leave empty to turn coding off."
+
+[params.github_repos]
+type = "string"
+default = ""
+pattern = "^[A-Za-z0-9._/, -]{0,256}$"
+max_length = 256
+description = "Repos Codex may work on, comma-separated, e.g. JamieOgun/test_app_jamie, my-site. Use owner/repo or just the repo name. Leave empty to allow every repo the GitHub token can see (or every repo in coding_workdir without a token)."
 
 [params.codex_model]
 type = "string"

@@ -58,7 +58,7 @@ from palmimo_sdk.robot import Palmimo
 
 import coding_tools
 from coding_tools import Announcement, CodexRunner
-from github_repos import GitHubRepos
+from github_repos import GitHubRepos, is_allowed, parse_allowed
 from robot_tools import PROMPT_LINES, ToolRunner, build_toolset, client_tool_configs, sync_tools
 from wake import SAMPLE_RATE as WAKE_RATE
 from wake import NameWakeDetector, WakeDetector, WakeEvent
@@ -444,7 +444,8 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
         workdir = Path(args.coding_workdir).expanduser()
         workdir.mkdir(parents=True, exist_ok=True)
         token = os.environ.get(GITHUB_TOKEN_ENV)
-        github = GitHubRepos(token, workdir) if token else None
+        allowed = parse_allowed(args.github_repos)
+        github = GitHubRepos(token, workdir, allowed) if token else None
         codex = CodexRunner(
             workdir,
             announcements,
@@ -452,6 +453,7 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
             sandbox=args.codex_sandbox,
             network=not args.no_codex_network,
             github=github,
+            allowed=allowed,
         )
         if github and args.codex_sandbox == "full-access":
             logger.warning(
@@ -459,6 +461,10 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
                 "that keeps your GitHub token away from it. Use workspace-write unless you need more."
             )
         repos = await codex.repos()
+        if allowed:
+            missing = [a for a in allowed if not any(is_allowed(r, None, [a.split("/")[-1]]) for r in repos)]
+            if missing:
+                logger.warning("these github_repos were not found: %s", ", ".join(missing))
         source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
         logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
         configs += coding_tools.tool_configs(repos)
@@ -537,6 +543,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--coding-workdir", default="", help="Folder of git repos Codex may work in, e.g. ~/code; empty for no coding"
+    )
+    parser.add_argument(
+        "--github-repos",
+        default="",
+        help='Repos Codex may use, comma-separated, as "owner/repo" or "repo"; empty for any',
     )
     parser.add_argument("--codex-model", default="", help="Codex model; empty for Codex's default")
     parser.add_argument(
