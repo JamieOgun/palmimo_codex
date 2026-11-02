@@ -82,8 +82,17 @@ def slug(text: str, limit: int = 40) -> str:
 
 
 def parse_allowed(text: str) -> list[str]:
-    """"me/app, other-repo" -> ["me/app", "other-repo"]: the repos Codex may use; [] means any."""
-    return [part.strip().strip("/") for part in text.split(",") if part.strip().strip("/")]
+    """"me/app, other-repo" -> ["me/app", "other-repo"]: the repos Codex may use; [] means any.
+
+    Pasted GitHub URLs work too: "https://github.com/me/app.git" becomes "me/app".
+    """
+    entries = []
+    for part in text.split(","):
+        entry = re.sub(r"^(https?://)?(www\.)?github\.com/", "", part.strip(), flags=re.IGNORECASE)
+        entry = re.sub(r"\.git$", "", entry.strip("/")).strip("/")
+        if entry:
+            entries.append(entry)
+    return entries
 
 
 def is_allowed(name: str, full_name: str | None, allowed: list[str]) -> bool:
