@@ -68,6 +68,15 @@ OPENAI_KEY_ENV = "OPENAI_API_KEY"
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 SIGNED_URL = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={agent_id}"
 
+#: Go back to sleep after this long with nobody talking; ElevenLabs asks "are you still there?" at 30.
+IDLE_TIMEOUT_SECS = 25.0
+#: Longest one conversation may run, as a cost guard.
+MAX_SESSION_SECS = 600.0
+#: OpenAI model that transcribes speech near the robot to hear its name.
+STT_MODEL = "gpt-4o-mini-transcribe"
+#: Folder on the robot where repos are cloned and Codex works.
+CODING_WORKDIR = "~/code"
+
 #: Mic chunk length sent to the agent.
 CHUNK_SECONDS = 0.05
 #: Keep the mic muted this long after the robot's last sample, to cover the
@@ -406,11 +415,11 @@ async def conversation(
                     goodbye_done = now > max(player.busy_until + 0.3, last_audio + 1.0)
                     if goodbye_done or now - sleep_asked > SLEEP_GOODBYE_MAX_SECONDS:
                         return "asked to sleep"
-                if now - started > args.max_session_secs:
-                    return f"session cap of {args.max_session_secs:g}s"
+                if now - started > MAX_SESSION_SECS:
+                    return f"session cap of {MAX_SESSION_SECS:g}s"
                 last_activity = max(last_heard, player.busy_until, tools.last_finished)
-                if not tools.busy and now - last_activity > args.idle_timeout_secs:
-                    return f"idle for {args.idle_timeout_secs:g}s"
+                if not tools.busy and now - last_activity > IDLE_TIMEOUT_SECS:
+                    return f"idle for {IDLE_TIMEOUT_SECS:g}s"
 
         logger.info("listening; start talking")
         tasks = {asyncio.create_task(t) for t in (send_mic(), receive(), watch(), forward_announcements(), stop.wait())}
@@ -438,38 +447,23 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     configs = client_tool_configs(toolset)
     prompt_lines = PROMPT_LINES
     announcements: asyncio.Queue[Announcement] = asyncio.Queue()
-    handlers: dict[str, coding_tools.Handler] = {}
-    codex: CodexRunner | None = None
-    if args.coding_workdir:
-        workdir = Path(args.coding_workdir).expanduser()
-        workdir.mkdir(parents=True, exist_ok=True)
-        token = os.environ.get(GITHUB_TOKEN_ENV)
-        allowed = parse_allowed(args.github_repos)
-        github = GitHubRepos(token, workdir, allowed) if token else None
-        codex = CodexRunner(
-            workdir,
-            announcements,
-            model=args.codex_model,
-            sandbox=args.codex_sandbox,
-            network=not args.no_codex_network,
-            github=github,
-            allowed=allowed,
-        )
-        if github and args.codex_sandbox == "full-access":
-            logger.warning(
-                "codex_sandbox is full-access: Codex can change anything on the robot, including the git setup "
-                "that keeps your GitHub token away from it. Use workspace-write unless you need more."
-            )
-        repos = await codex.repos()
-        if allowed:
-            missing = [a for a in allowed if not any(is_allowed(r, None, [a.split("/")[-1]]) for r in repos)]
-            if missing:
-                logger.warning("these github_repos were not found: %s", ", ".join(missing))
-        source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
-        logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
-        configs += coding_tools.tool_configs(repos)
-        prompt_lines = PROMPT_LINES + coding_tools.PROMPT_LINES
-        handlers = coding_tools.handlers(codex)
+    workdir = Path(CODING_WORKDIR).expanduser()
+    workdir.mkdir(parents=True, exist_ok=True)
+    token = os.environ.get(GITHUB_TOKEN_ENV)
+    allowed = parse_allowed(args.github_repos)
+    github = GitHubRepos(token, workdir, allowed) if token else None
+    codex = CodexRunner(workdir, announcements, model=args.codex_model, github=github, allowed=allowed)
+    repos = await codex.repos()
+    if allowed:
+        missing = [a for a in allowed if not any(is_allowed(r, None, [a.split("/")[-1]]) for r in repos)]
+        if missing:
+            where = "on GitHub" if github else f"in {workdir} (GITHUB_TOKEN is not set, so nothing is cloned)"
+            logger.warning("these github_repos were not found %s: %s", where, ", ".join(missing))
+    source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
+    logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
+    configs += coding_tools.tool_configs(repos)
+    prompt_lines = PROMPT_LINES + coding_tools.PROMPT_LINES
+    handlers = coding_tools.handlers(codex)
     try:
         await asyncio.to_thread(sync_tools, args.agent_id, api_key, configs, prompt_lines)
     except (RuntimeError, OSError, KeyError) as exc:
@@ -477,7 +471,7 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
         logger.warning("could not register the robot's tools on the agent: %s", exc)
 
     # Loads (and on first run downloads) the speech detector.
-    detector: WakeDetector = await asyncio.to_thread(NameWakeDetector, OpenAI(), args.stt_model)
+    detector: WakeDetector = await asyncio.to_thread(NameWakeDetector, OpenAI(), STT_MODEL)
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -523,8 +517,7 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
             logger.info("conversation ended (%s)", reason)
             detector.reset()
             drain(mic_chunks)
-    if codex is not None:
-        await codex.close()
+    await codex.close()
     logger.info("stopped")
 
 
@@ -535,30 +528,11 @@ def main() -> int:
     parser.add_argument("--mic-device", default="ReSpeaker", help="Part of the mic's name in `arecord -l`")
     parser.add_argument("--volume", type=float, default=1.0, help="Output gain; 1.0 is the voice's own level")
     parser.add_argument(
-        "--idle-timeout-secs", type=float, default=25.0, help="Go back to sleep after this long without activity"
-    )
-    parser.add_argument("--max-session-secs", type=float, default=600.0, help="Longest one conversation may run")
-    parser.add_argument(
-        "--stt-model", default="gpt-4o-mini-transcribe", help="OpenAI model that transcribes speech to hear the name"
-    )
-    parser.add_argument(
-        "--coding-workdir", default="", help="Folder of git repos Codex may work in, e.g. ~/code; empty for no coding"
-    )
-    parser.add_argument(
         "--github-repos",
         default="",
         help='Repos Codex may use, comma-separated, as "owner/repo" or "repo"; empty for any',
     )
     parser.add_argument("--codex-model", default="", help="Codex model; empty for Codex's default")
-    parser.add_argument(
-        "--codex-sandbox",
-        default="workspace-write",
-        choices=("read-only", "workspace-write", "full-access"),
-        help="What Codex may touch: read-only, workspace-write (only the repo), or full-access",
-    )
-    parser.add_argument(
-        "--no-codex-network", action="store_true", help="Block network access for Codex's commands (no git push)"
-    )
     parser.add_argument(
         "--no-robot", action="store_true", help="Run the tools without motors or face display (for testing off the robot)"
     )

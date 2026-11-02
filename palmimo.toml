@@ -12,14 +12,8 @@ command = [
   "--speaker-device", "{speaker_device}",
   "--mic-device", "{mic_device}",
   "--volume", "{volume}",
-  "--idle-timeout-secs", "{idle_timeout_secs}",
-  "--max-session-secs", "{max_session_secs}",
-  "--stt-model", "{stt_model}",
-  "--coding-workdir", "{coding_workdir}",
   "--github-repos", "{github_repos}",
   "--codex-model", "{codex_model}",
-  "--codex-sandbox", "{codex_sandbox}",
-  "{block_codex_network}",
 ]
 
 # The mic and speaker are the audio device; the motors and face display are motor_display.
@@ -52,39 +46,12 @@ min = 0.0
 max = 3.0
 description = "Output gain; 1.0 is the voice's own level."
 
-[params.idle_timeout_secs]
-type = "float"
-default = 25.0
-min = 5.0
-max = 600.0
-description = "Go back to sleep after this many seconds without anyone talking. Keep it under 30, where ElevenLabs would start asking if you are still there."
-
-[params.max_session_secs]
-type = "float"
-default = 600.0
-min = 30.0
-max = 3600.0
-description = "Longest one conversation may run before the robot goes back to sleep, as a cost guard."
-
-[params.stt_model]
-type = "string"
-default = "gpt-4o-mini-transcribe"
-pattern = "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
-description = "OpenAI model that transcribes speech near the robot to hear its name."
-
-[params.coding_workdir]
-type = "string"
-default = "~/code"
-pattern = "^[A-Za-z0-9~/._-]{0,128}$"
-max_length = 128
-description = "Folder on the robot where Codex works. With GITHUB_TOKEN set, your repos are cloned here automatically; without it, git clone them here yourself. Leave empty to turn coding off."
-
 [params.github_repos]
 type = "string"
 default = ""
 pattern = "^[A-Za-z0-9._/:, -]{0,256}$"
 max_length = 256
-description = "Repos Codex may work on, comma-separated, e.g. JamieOgun/test_app_jamie, my-site. Use owner/repo, just the repo name, or the GitHub URL. Leave empty to allow every repo the GitHub token can see (or every repo in coding_workdir without a token)."
+description = "Repos Codex may work on, comma-separated, e.g. JamieOgun/test_app_jamie, my-site. Use owner/repo, just the repo name, or the GitHub URL. Leave empty to allow every repo the GitHub token can see (or every repo already in ~/code on the robot without a token)."
 
 [params.codex_model]
 type = "string"
@@ -92,18 +59,6 @@ default = ""
 pattern = "^[A-Za-z0-9._-]{0,64}$"
 max_length = 64
 description = "Codex model, e.g. gpt-6.1-sol. Leave empty for Codex's default."
-
-[params.codex_sandbox]
-type = "enum"
-choices = ["workspace-write", "read-only", "full-access"]
-default = "workspace-write"
-description = "What Codex may touch: workspace-write edits the repo and runs commands; read-only only reads; full-access has no limits."
-
-[params.block_codex_network]
-type = "bool"
-default = false
-flag = "--no-codex-network"
-description = "Block network access for the commands Codex runs. Off by default, so Codex can git push and install packages."
 
 [env.ELEVENLABS_API_KEY]
 required = true

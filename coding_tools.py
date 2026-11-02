@@ -3,13 +3,13 @@
 The agent gets four client tools: start, check, follow up and cancel a coding
 task. They drive Codex through its official Python SDK (``openai-codex``,
 which ships the Codex binary). Tasks run in repos in one folder on the robot
-(``--coding-workdir``). With a GitHub token, github_repos.py fills that folder
+(``~/code``). With a GitHub token, github_repos.py fills that folder
 by itself and pushes each task's changes; without one, each git repo already
 in the folder is a repo the agent can name.
 
-Codex works inside its sandbox (``workspace-write`` by default: it can edit
-files in the repo and run commands, with network access unless
-``--no-codex-network``, so it can push) and never stops to ask for approval:
+Codex works inside the ``workspace-write`` sandbox (it can edit files in the
+repo and run commands, with network access so it can install packages) and
+never stops to ask for approval:
 anything outside the sandbox is refused. When a task ends,
 an ``Announcement`` goes on a queue, and main.py has the agent say so, waking
 the robot first if it is asleep.
@@ -50,6 +50,10 @@ PROMPT_LINES = (
         "Tasks take a minute or more: after starting one, confirm in a few words and let the user go. "
         "You will be told when it finishes. Changes are pushed to a new branch with a pull request, never to the "
         "main branch."
+    ),
+    (
+        "Only the repos listed in start_coding_task's repo field are available. Never tell the user you can work "
+        "on a repo that is not listed there; name the ones that are instead."
     ),
     (
         "When you report on code, never read code, file paths, commands or diffs aloud: say the outcome in one "
@@ -132,8 +136,6 @@ class CodexRunner:
         workdir: Path,
         announcements: asyncio.Queue[Announcement],
         model: str | None = None,
-        sandbox: str = "workspace-write",
-        network: bool = True,
         github: GitHubRepos | None = None,
         allowed: list[str] | None = None,
     ) -> None:
@@ -143,10 +145,9 @@ class CodexRunner:
         self._allowed = allowed or []
         self._announcements = announcements
         self._model = model or None
-        self._sandbox = Sandbox(sandbox)
         self._config = {
             # Lets commands inside the workspace-write sandbox use the network (installs, fetches).
-            "sandbox_workspace_write": {"network_access": network},
+            "sandbox_workspace_write": {"network_access": True},
             # Commands Codex runs see only basic variables (HOME, PATH, USER, ...), never the
             # robot's API keys or GitHub token, which this process holds.
             "shell_environment_policy": {"inherit": "core", "exclude": ["*KEY*", "*SECRET*", "*TOKEN*"]},
@@ -269,7 +270,7 @@ class CodexRunner:
             codex = await self._client()
             self._thread = await codex.thread_start(
                 cwd=str(path),
-                sandbox=self._sandbox,
+                sandbox=Sandbox.workspace_write,
                 approval_mode=ApprovalMode.deny_all,
                 developer_instructions=CODEX_INSTRUCTIONS,
                 model=self._model,
@@ -347,7 +348,11 @@ class CodexRunner:
 
 def tool_configs(repos: list[str]) -> list[dict[str, Any]]:
     """The coding tools as ElevenLabs client tools; *repos* go in the descriptions."""
-    repo_hint = f" One of: {', '.join(repos)}." if repos else ""
+    repo_hint = (
+        f" One of: {', '.join(repos)}."
+        if repos
+        else " No repos are set up yet, so a task will fail; tell the user instead of starting one."
+    )
 
     def tool(name: str, description: str, properties: dict[str, Any] | None = None, required: tuple = ()) -> dict:
         config: dict[str, Any] = {
