@@ -57,8 +57,10 @@ from palmimo_sdk.io.alsa_devices import resolve_alsa_device
 from palmimo_sdk.robot import Palmimo
 
 import coding_tools
+import reactions
 from coding_tools import Announcement, CodexRunner
 from github_repos import GitHubRepos
+from reactions import TagReactor
 from robot_tools import PROMPT_LINES, ToolRunner, build_toolset, client_tool_configs, sync_tools
 from wake import SAMPLE_RATE as WAKE_RATE
 from wake import NameWakeDetector, WakeEvent
@@ -323,6 +325,7 @@ async def wait_for_wake(
 async def conversation(
     args: argparse.Namespace,
     api_key: str,
+    robot: Palmimo,
     toolset: AgentToolSet,
     mic_chunks: asyncio.Queue[bytes],
     mic_rate: int,
@@ -355,6 +358,7 @@ async def conversation(
             await ws.send(json.dumps(event))
 
         tools = ToolRunner(toolset, send, handlers)
+        reactor = TagReactor(robot, toolset)
         started = last_heard = last_audio = time.monotonic()
 
         async def announce(news: Announcement) -> None:
@@ -388,11 +392,15 @@ async def conversation(
                 kind = event.get("type")
                 if kind == "audio":
                     last_audio = time.monotonic()
-                    player.play(base64.b64decode(event["audio_event"]["audio_base_64"]))
+                    audio = event["audio_event"]
+                    # This chunk starts playing once what is already queued has played.
+                    reactor.feed(audio.get("alignment"), max(last_audio, player.busy_until))
+                    player.play(base64.b64decode(audio["audio_base_64"]))
                 elif kind == "client_tool_call":
                     tools.handle(event["client_tool_call"])
                 elif kind == "interruption":
                     player.interrupt()
+                    reactor.interrupt()
                     await tools.interrupt()
                 elif kind == "ping":
                     await send({"type": "pong", "event_id": event["ping_event"]["event_id"]})
@@ -437,6 +445,7 @@ async def conversation(
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await reactor.close()
             await tools.close()
             player.close()
 
@@ -463,10 +472,10 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
     logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
     configs += coding_tools.tool_configs(repos)
-    prompt_lines = PROMPT_LINES + coding_tools.PROMPT_LINES
+    prompt_lines = PROMPT_LINES + reactions.PROMPT_LINES + coding_tools.PROMPT_LINES
     handlers = coding_tools.handlers(codex)
     try:
-        await asyncio.to_thread(sync_tools, args.agent_id, api_key, configs, prompt_lines)
+        await asyncio.to_thread(sync_tools, args.agent_id, api_key, configs, prompt_lines, coding_tools.RETIRED_PROMPT_LINES)
     except (RuntimeError, OSError, KeyError) as exc:
         # The conversation still works without them; the agent just cannot move the robot.
         logger.warning("could not register the robot's tools on the agent: %s", exc)
@@ -512,7 +521,7 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
             drain(mic_chunks)  # don't send the chime itself to the agent
             try:
                 reason = await conversation(
-                    args, api_key, toolset, mic_chunks, mic_rate, woken, handlers, announcements, stop
+                    args, api_key, robot, toolset, mic_chunks, mic_rate, woken, handlers, announcements, stop
                 )
             except (RuntimeError, OSError, websockets.WebSocketException) as exc:
                 logger.warning("could not talk to ElevenLabs: %s", exc)

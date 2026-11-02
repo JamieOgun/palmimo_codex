@@ -52,14 +52,28 @@ PROMPT_LINES = (
         "main branch."
     ),
     (
-        "Only the repos listed in start_coding_task's repo field are available. Never tell the user you can work "
-        "on a repo that is not listed there; name the ones that are instead."
+        "If asked which repos you can use, name at most three from start_coding_task's repo field and offer to "
+        "try any other the user names; never read out a long list. If no repos are listed, say coding is not set "
+        "up yet."
     ),
     (
         "When you report on code, never read code, file paths, commands or diffs aloud: say the outcome in one "
         "short sentence, such as 'Done, the tests pass.'"
     ),
 )
+
+#: Lines earlier versions added to the agent's prompt; removed from it on startup.
+RETIRED_PROMPT_LINES = (
+    "You can run coding tasks with Codex on repos stored on this robot: start_coding_task, coding_task_status, "
+    "continue_coding_task and cancel_coding_task. Pass the user's request on in their words, in English. "
+    "Tasks take a minute or more: after starting one, confirm in a few words and let the user go. "
+    "You will be told when it finishes.",
+    "Only the repos listed in start_coding_task's repo field are available. Never tell the user you can work "
+    "on a repo that is not listed there; name the ones that are instead.",
+)
+
+#: How many repo names go in start_coding_task's description; the rest can still be named.
+LISTED_REPOS = 8
 
 
 @dataclass
@@ -347,11 +361,12 @@ class CodexRunner:
 
 def tool_configs(repos: list[str]) -> list[dict[str, Any]]:
     """The coding tools as ElevenLabs client tools; *repos* go in the descriptions."""
-    repo_hint = (
-        f" One of: {', '.join(repos)}."
-        if repos
-        else " No repos are set up yet, so a task will fail; tell the user instead of starting one."
-    )
+    if not repos:
+        repo_hint = " No repos are set up yet, so a task will fail; tell the user instead of starting one."
+    elif len(repos) > LISTED_REPOS:
+        repo_hint = f" Most recently used: {', '.join(repos[:LISTED_REPOS])}. Others the user names can work too."
+    else:
+        repo_hint = f" One of: {', '.join(repos)}."
 
     def tool(name: str, description: str, properties: dict[str, Any] | None = None, required: tuple = ()) -> dict:
         config: dict[str, Any] = {

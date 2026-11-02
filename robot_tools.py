@@ -165,14 +165,19 @@ def _same(existing: Any, wanted: Any) -> bool:
 
 
 def sync_tools(
-    agent_id: str, api_key: str, configs: list[dict[str, Any]], prompt_lines: tuple[str, ...] = PROMPT_LINES
+    agent_id: str,
+    api_key: str,
+    configs: list[dict[str, Any]],
+    prompt_lines: tuple[str, ...] = PROMPT_LINES,
+    retired_lines: tuple[str, ...] = (),
 ) -> None:
     """Make sure every config exists as a workspace tool, is current, and is attached to the agent.
 
     Tools named in EXCLUDED_TOOLS are detached, so dropping one here also
     drops it from the agent (it stays in the workspace, unused).
 
-    Also appends any missing *prompt_lines* to the agent's prompt, enables
+    Also removes *retired_lines* from the agent's prompt (lines an earlier
+    version added), appends any missing *prompt_lines*, enables
     skip_turn, and applies TURN_SETTINGS.
     """
     existing = {
@@ -200,13 +205,16 @@ def sync_tools(
     attached = [tool_id for tool_id in attached if tool_id not in retired]
     missing = [tool_id for tool_id in tool_ids if tool_id not in attached]
     text = prompt.get("prompt") or ""
+    old_lines = [line for line in retired_lines if line in text]
+    for line in old_lines:
+        text = text.replace("\n\n" + line, "").replace(line, "")
     new_lines = [line for line in prompt_lines if line not in text]
     built_in = prompt.get("built_in_tools") or {}
     needs_skip = not built_in.get("skip_turn")
     turn = config.get("turn") or {}
     needs_turn = not _same(turn, TURN_SETTINGS)
     needs_quiet_start = bool(config["agent"].get("first_message"))
-    if not missing and not stale and not new_lines and not needs_skip and not needs_turn and not needs_quiet_start:
+    if not missing and not stale and not old_lines and not new_lines and not needs_skip and not needs_turn and not needs_quiet_start:
         logger.info("agent is up to date: %d robot tools attached", len(tool_ids))
         return
     # Send the whole prompt and turn config back with only these fields
@@ -214,6 +222,8 @@ def sync_tools(
     # `tools` list cannot be sent together with tool_ids.
     prompt = {key: value for key, value in prompt.items() if key != "tools"}
     prompt["tool_ids"] = attached + missing
+    if old_lines and not new_lines:
+        prompt["prompt"] = text
     if new_lines:
         prompt["prompt"] = "\n\n".join([text.rstrip(), *new_lines]) if text.strip() else "\n\n".join(new_lines)
     if needs_skip:
@@ -225,10 +235,11 @@ def sync_tools(
         body["turn"] = {**turn, **TURN_SETTINGS}
     _request("PATCH", f"/agents/{agent_id}", api_key, {"conversation_config": body})
     logger.info(
-        "updated the agent: %d tools attached, %d detached, %d prompt lines added, skip_turn %s, turn settings %s, first message %s",
+        "updated the agent: %d tools attached, %d detached, %d prompt lines added, %d removed, skip_turn %s, turn settings %s, first message %s",
         len(missing),
         len(stale),
         len(new_lines),
+        len(old_lines),
         "enabled" if needs_skip else "present",
         "updated" if needs_turn else "current",
         "cleared" if needs_quiet_start else "already empty",
