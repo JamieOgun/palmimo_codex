@@ -3,7 +3,7 @@
 
 schema = 1
 name = "elevenlabs-voice"
-description = "Call Palmimo by name to talk with an ElevenLabs agent that moves the robot and can run coding tasks with Codex. Sleeps when told to or after a quiet spell."
+description = "Talk with an ElevenLabs agent that moves the robot and can run coding tasks with Codex. Always listening while the app runs."
 
 # Run through `uv run` in the app's directory. {param} is replaced with the value set below.
 command = [
@@ -58,8 +58,8 @@ description = "ElevenLabs API key, used to start conversations with the agent."
 help_url = "https://elevenlabs.io/app/settings/api-keys"
 
 [env.OPENAI_API_KEY]
-required = true
-description = "OpenAI API key, used to hear the robot's name in nearby speech, and by Codex for coding tasks."
+required = false
+description = "OpenAI API key, used by Codex for coding tasks (not needed if Codex is already logged in)."
 help_url = "https://platform.openai.com/api-keys"
 
 [env.GITHUB_TOKEN]

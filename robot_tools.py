@@ -7,11 +7,10 @@ companion agent uses. Two parts:
   it to the agent, adds ``PROMPT_LINES`` to the agent's prompt, and makes the
   agent quiet when nobody is talking to it (``TURN_SETTINGS`` and the
   ``skip_turn`` system tool), and clears the agent's first message, since
-  the robot is woken by name and should just listen. Nothing is changed when
-  it is already current.
+  the robot is always listening and should not greet on every reconnect.
+  Nothing is changed when it is already current.
 - ``ToolRunner`` answers the agent's ``client_tool_call`` events by running the
-  tool on the robot and sending back a ``client_tool_result``. ``go_to_sleep``
-  is handled here rather than on the robot: it ends the conversation.
+  tool on the robot and sending back a ``client_tool_result``.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -29,7 +27,7 @@ from palmimo_sdk.agent import AgentToolSet
 #: ``say`` would need a speaker of its own (the agent already talks), and
 #: ``capture`` returns a photo, which a client tool result cannot carry. The
 #: rest are left out to keep the agent's context small: walking (the robot sits
-#: on a desk), ``sleep``/``wake_up`` (poses easily confused with go_to_sleep),
+#: on a desk), ``sleep``/``wake_up`` (poses that park the robot mid-conversation),
 #: and gestures that others already cover.
 EXCLUDED_TOOLS = (
     "say",
@@ -45,6 +43,9 @@ EXCLUDED_TOOLS = (
     "stretch",
     "wave_both",
 )
+
+#: Tools an earlier version of this app registered; detached from the agent on startup.
+RETIRED_TOOLS = ("go_to_sleep",)
 
 #: Optional arguments every motion carries but that make no sense here: the
 #: agent speaks with its own voice, and ``reason`` is only for logs.
@@ -66,25 +67,16 @@ PROMPT_LINES = (
         "the user goes quiet, or there is nothing useful to add, call skip_turn and stay silent. "
         "Never ask whether the user is still there."
     ),
+    "Your name is Palmimo (パルミーモ). Reply in the language people use.",
+)
+
+#: Lines an earlier version added to the agent's prompt; removed on startup.
+RETIRED_PROMPT_LINES = (
     (
         "People wake you by calling your name, Palmimo (パルミーモ); reply in the language they use. "
         "When they say goodbye or ask you to sleep, say a short goodbye and call go_to_sleep."
     ),
 )
-
-#: Ends the conversation and puts the robot back to listening for its name.
-#: Answered by ToolRunner itself, not by the SDK toolbox.
-GO_TO_SLEEP = {
-    "type": "client",
-    "name": "go_to_sleep",
-    "description": (
-        "Go back to sleep and stop listening until someone calls your name again. Call it when the user "
-        "says goodbye, asks you to sleep or stop listening, or says that's all. Say a short goodbye first. "
-        "Do not call it for pauses, silence, or when you are unsure."
-    ),
-    "expects_response": True,
-    "response_timeout_secs": 5,
-}
 
 #: ElevenLabs re-engages the user after ``turn_timeout`` seconds of silence
 #: (default 7). 30 is the longest it allows; skip_turn covers the rest.
@@ -141,7 +133,6 @@ def client_tool_configs(toolset: AgentToolSet) -> list[dict[str, Any]]:
                 "required": [key for key in schema.get("required", []) if key in properties],
             }
         configs.append(config)
-    configs.append(GO_TO_SLEEP)
     return configs
 
 
@@ -173,8 +164,8 @@ def sync_tools(
 ) -> None:
     """Make sure every config exists as a workspace tool, is current, and is attached to the agent.
 
-    Tools named in EXCLUDED_TOOLS are detached, so dropping one here also
-    drops it from the agent (it stays in the workspace, unused).
+    Tools named in EXCLUDED_TOOLS or RETIRED_TOOLS are detached, so dropping
+    one here also drops it from the agent (it stays in the workspace, unused).
 
     Also removes *retired_lines* from the agent's prompt (lines an earlier
     version added), appends any missing *prompt_lines*, enables
@@ -199,7 +190,7 @@ def sync_tools(
     agent = _request("GET", f"/agents/{agent_id}", api_key)
     config = agent["conversation_config"]
     prompt = config["agent"]["prompt"]
-    retired = {existing[name]["id"] for name in EXCLUDED_TOOLS if name in existing}
+    retired = {existing[name]["id"] for name in EXCLUDED_TOOLS + RETIRED_TOOLS if name in existing}
     attached = prompt.get("tool_ids") or []
     stale = [tool_id for tool_id in attached if tool_id in retired]
     attached = [tool_id for tool_id in attached if tool_id not in retired]
@@ -255,15 +246,6 @@ class ToolRunner:
         #: Tools answered here instead of on the robot: name -> async (args) -> (text, is_error).
         self._handlers = handlers or {}
         self._tasks: set[asyncio.Task[None]] = set()
-        #: Set when the agent calls go_to_sleep.
-        self.sleep_requested = asyncio.Event()
-        #: When the last tool finished (time.monotonic()); 0 before any.
-        self.last_finished = 0.0
-
-    @property
-    def busy(self) -> bool:
-        """Whether a tool is still running (a long dance should not count as silence)."""
-        return bool(self._tasks)
 
     def handle(self, call: dict[str, Any]) -> None:
         """Start one ``client_tool_call`` in the background, so audio keeps flowing while the robot moves."""
@@ -275,17 +257,13 @@ class ToolRunner:
         name = call.get("tool_name", "")
         args = {key: value for key, value in (call.get("parameters") or {}).items() if key not in HIDDEN_ARGS}
         logger.info("tool %s(%s)", name, json.dumps(args))
-        if name == GO_TO_SLEEP["name"]:
-            text, is_error = "going to sleep", False
-            self.sleep_requested.set()
-        elif name in self._handlers:
+        if name in self._handlers:
             text, is_error = await self._handlers[name](args)
         else:
             # AgentToolSet.call never raises for a bad call; it returns an error the agent can read.
             result = await self._toolset.call(name, args)
             text, is_error = result.text, result.is_error
         logger.info("  -> %s", text[:120])
-        self.last_finished = time.monotonic()
         await self._send(
             {
                 "type": "client_tool_result",

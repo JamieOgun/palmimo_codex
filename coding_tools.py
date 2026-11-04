@@ -11,8 +11,7 @@ Codex works inside the ``workspace-write`` sandbox (it can edit files in the
 repo and run commands, with network access so it can install packages) and
 never stops to ask for approval:
 anything outside the sandbox is refused. When a task ends,
-an ``Announcement`` goes on a queue, and main.py has the agent say so, waking
-the robot first if it is asleep.
+an ``Announcement`` goes on a queue, and main.py has the agent say so.
 
 Codex logs in with ``OPENAI_API_KEY`` unless it is already logged in (for
 example with ``codex login`` on a dev machine).

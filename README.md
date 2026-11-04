@@ -1,6 +1,6 @@
 # elevenlabs-voice
 
-A Palmimo DevKit app. Say "Palmimo" (パルミーモ) to wake the robot and talk with an ElevenLabs agent. The agent can move the robot, change its face, and run coding tasks on your GitHub repos with Codex. The robot goes back to sleep when you tell it to, or after 25 seconds of quiet.
+A Palmimo DevKit app. Talk with an ElevenLabs agent through the robot. The agent can move the robot, change its face, and run coding tasks on your GitHub repos with Codex. The robot listens the whole time the app runs; a paid ElevenLabs conversation stays open until you stop the app.
 
 ## Setup in the Portal
 
@@ -10,7 +10,7 @@ A Palmimo DevKit app. Say "Palmimo" (パルミーモ) to wake the robot and talk
    | Secret | Needed for |
    |---|---|
    | `ELEVENLABS_API_KEY` | Talking with the agent |
-   | `OPENAI_API_KEY` | Hearing the robot's name, and Codex |
+   | `OPENAI_API_KEY` | Codex (optional if Codex is already logged in) |
    | `GITHUB_TOKEN` | Coding tasks: needs Contents and Pull requests, read and write, on the repos Codex may use |
 
 3. Set the parameters:
@@ -32,8 +32,7 @@ Ask for a change in one of your repos by name. The robot clones it into `~/code`
 
 | File | Role |
 |---|---|
-| `main.py` | Wake, conversation loop, audio |
-| `wake.py` | Hears the robot's name |
+| `main.py` | Conversation loop, audio |
 | `robot_tools.py` | Movement and face tools for the agent |
 | `coding_tools.py` | Coding tools that drive Codex |
 | `github_repos.py` | Clones repos and opens pull requests |
