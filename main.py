@@ -42,6 +42,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -282,6 +283,7 @@ async def conversation(
     handlers: dict[str, coding_tools.Handler],
     announcements: asyncio.Queue[Announcement],
     stop: asyncio.Event,
+    resting_face: Callable[[], str | None],
 ) -> str:
     """One ElevenLabs conversation, open until it is closed or the app stops. Returns why it ended.
 
@@ -305,7 +307,7 @@ async def conversation(
             await ws.send(json.dumps(event))
 
         tools = ToolRunner(toolset, send, handlers)
-        reactor = TagReactor(robot, toolset)
+        reactor = TagReactor(robot, toolset, resting_face)
 
         async def forward_announcements() -> None:
             while True:
@@ -376,8 +378,16 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     github = GitHubRepos(token, workdir) if token else None
     faces: set[asyncio.Task[None]] = set()  # keeps face changes alive until they finish
 
+    async def change_face(state: str) -> None:
+        await show_face(robot, TASK_FACES.get(state))
+        if state == "running":
+            # A reaction shown just before may still auto-return to neutral; show the thinking face again after it.
+            await asyncio.sleep(reactions.FACE_HOLD_SECS + 0.3)
+            if codex.busy:
+                await show_face(robot, TASK_FACES["running"])
+
     def task_face(state: str) -> None:
-        change = asyncio.create_task(show_face(robot, TASK_FACES.get(state)))
+        change = asyncio.create_task(change_face(state))
         faces.add(change)
         change.add_done_callback(faces.discard)
 
@@ -423,7 +433,9 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
             drain(mic_chunks)  # don't send audio from between conversations
             try:
                 reason = await conversation(
-                    args, api_key, robot, toolset, mic_chunks, mic_rate, handlers, announcements, stop
+                    args, api_key, robot, toolset, mic_chunks, mic_rate, handlers, announcements, stop,
+                    # Back to the thinking face after each reaction while Codex works.
+                    lambda: "THINKING" if codex.busy else None,
                 )
             except (RuntimeError, OSError, websockets.WebSocketException) as exc:
                 logger.warning("could not talk to ElevenLabs: %s", exc)

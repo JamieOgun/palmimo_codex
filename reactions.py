@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +26,8 @@ logger = logging.getLogger("elevenlabs_agent")
 FACE_HOLD_SECS = 2.5
 #: Length of a reaction's gesture; short so it fits the words it goes with.
 GESTURE_SECS = 1.5
+#: The same gesture is not repeated within this long (a clap on every reply gets tiresome).
+GESTURE_REPEAT_SECS = 20.0
 #: Added to each reaction's time, to line it up with the speaker's own buffering.
 SPEAKER_LATENCY_SECS = 0.0
 #: Longest text between brackets still read as a tag.
@@ -57,6 +60,10 @@ PROMPT_LINES = (
         "[thoughtful], [whispers], [annoyed], [sighs] and [warmly] each show a matching face and gesture, "
         "so you need no tool call for those."
     ),
+    (
+        "Use at most one audio tag per reply, and only when you really feel it; most replies need none. "
+        "Do not use [excited] for ordinary answers or confirmations; save it for good news."
+    ),
 )
 
 
@@ -72,9 +79,15 @@ def match(tag: str) -> Reaction | None:
 class TagReactor:
     """Finds tags in the agent's audio events and plays each one's reaction on time."""
 
-    def __init__(self, robot: Any, toolset: AgentToolSet) -> None:
+    def __init__(
+        self, robot: Any, toolset: AgentToolSet, resting_face: Callable[[], str | None] = lambda: None
+    ) -> None:
         self._robot = robot
         self._toolset = toolset
+        #: The face to go back to after a reaction (e.g. THINKING while Codex works); None for neutral.
+        self._resting_face = resting_face
+        self._latest: object = None  # the newest reaction; only it restores the resting face
+        self._gestured_at: dict[str, float] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._tag: list[str] | None = None  # text of a tag still open; None outside a tag
         self._tag_at = 0.0  # when the open tag's "[" is spoken (time.monotonic())
@@ -108,17 +121,42 @@ class TagReactor:
 
     async def _react(self, tag: str, reaction: Reaction, at: float) -> None:
         await asyncio.sleep(max(0.0, at - time.monotonic()))
-        # Skip the gesture while another motion runs (the agent's own tool call, or the last reaction).
-        gesture = reaction.gesture if reaction.gesture and not self._toolset.is_busy() else None
+        # Skip the gesture while another motion runs (the agent's own tool call, or the last reaction),
+        # or when it was just played.
+        now = time.monotonic()
+        gesture = reaction.gesture
+        if gesture and (self._toolset.is_busy() or now - self._gestured_at.get(gesture, -1e9) < GESTURE_REPEAT_SECS):
+            gesture = None
+        if gesture:
+            self._gestured_at[gesture] = now
         logger.info("tag [%s]: face %s, gesture %s", tag, reaction.face, gesture or "none")
+        token = self._latest = object()
         if self._robot.display is not None:
-            try:
+            if self._resting_face() is None:
                 # A hold time makes the display go back to neutral by itself.
-                await asyncio.to_thread(self._robot.set_expression, reaction.face, int(FACE_HOLD_SECS * 1000))
-            except Exception as exc:  # noqa: BLE001 -- the face is decoration; never let it stop the voice
-                logger.warning("could not change the face: %s", exc)
+                await self._set_face(reaction.face, int(FACE_HOLD_SECS * 1000))
+            else:
+                # The display can only fall back to neutral, so go back to the resting face here instead.
+                await self._set_face(reaction.face)
+                asyncio.get_running_loop().call_later(FACE_HOLD_SECS, self._restore, token)
         if gesture:
             await self._toolset.call(gesture, {"seconds": GESTURE_SECS})
+
+    def _restore(self, token: object) -> None:
+        if token is not self._latest:
+            return  # a newer reaction is showing; it restores the face when it ends
+        task = asyncio.create_task(self._set_face(self._resting_face()))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _set_face(self, face: str | None, hold_ms: int = 0) -> None:
+        try:
+            if face is None:
+                await asyncio.to_thread(self._robot.display.idle)
+            else:
+                await asyncio.to_thread(self._robot.set_expression, face, hold_ms)
+        except Exception as exc:  # noqa: BLE001 -- the face is decoration; never let it stop the voice
+            logger.warning("could not change the face: %s", exc)
 
     def interrupt(self) -> None:
         """Drop reactions not played yet, e.g. when the user talks over the robot."""
