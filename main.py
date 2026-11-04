@@ -54,6 +54,7 @@ from palmimo_sdk.robot import Palmimo
 
 import coding_tools
 import reactions
+import skills
 from coding_tools import Announcement, CodexRunner
 from github_repos import GitHubRepos
 from reactions import TagReactor
@@ -306,8 +307,9 @@ async def conversation(
         async def send(event: dict) -> None:
             await ws.send(json.dumps(event))
 
-        tools = ToolRunner(toolset, send, handlers)
-        reactor = TagReactor(robot, toolset, resting_face)
+        registry = skills.SkillRegistry(toolset)
+        tools = ToolRunner(toolset, send, {**handlers, **registry.handlers})
+        reactor = TagReactor(robot, toolset, lambda: "SLEEPY" if registry.sleep.sleeping else resting_face())
 
         async def forward_announcements() -> None:
             while True:
@@ -329,7 +331,8 @@ async def conversation(
                 if kind == "audio":
                     audio = event["audio_event"]
                     # This chunk starts playing once what is already queued has played.
-                    reactor.feed(audio.get("alignment"), max(time.monotonic(), player.busy_until))
+                    if not registry.sleep.sleeping:
+                        reactor.feed(audio.get("alignment"), max(time.monotonic(), player.busy_until))
                     player.play(base64.b64decode(audio["audio_base_64"]))
                 elif kind == "client_tool_call":
                     tools.handle(event["client_tool_call"])
@@ -340,7 +343,10 @@ async def conversation(
                 elif kind == "ping":
                     await send({"type": "pong", "event_id": event["ping_event"]["event_id"]})
                 elif kind == "user_transcript":
-                    logger.info("you: %s", event["user_transcription_event"]["user_transcript"])
+                    text = event["user_transcription_event"]["user_transcript"]
+                    logger.info("you: %s", text)
+                    if registry.feed(text):
+                        reactor.interrupt()
                 elif kind == "agent_response":
                     logger.info("agent: %s", event["agent_response_event"]["agent_response"])
             return "closed by ElevenLabs"
@@ -362,6 +368,7 @@ async def conversation(
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await reactor.close()
+            await registry.close()
             await tools.close()
             player.close()
 
@@ -396,7 +403,8 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     source = "your GitHub" if github else f"{workdir} (set GITHUB_TOKEN to use your GitHub repos)"
     logger.info("coding with Codex on repos from %s: %s", source, ", ".join(repos[:10]) or "none found")
     configs += coding_tools.tool_configs(repos)
-    prompt_lines = PROMPT_LINES + reactions.PROMPT_LINES + coding_tools.PROMPT_LINES
+    configs += skills.tool_configs()
+    prompt_lines = PROMPT_LINES + reactions.PROMPT_LINES + coding_tools.PROMPT_LINES + skills.PROMPT_LINES
     handlers = coding_tools.handlers(codex)
     try:
         retired = RETIRED_PROMPT_LINES + coding_tools.RETIRED_PROMPT_LINES
