@@ -37,6 +37,12 @@ Ask for a change in one of your repos by name. The robot clones it into `~/code`
 | `coding_tools.py` | Coding tools that drive Codex |
 | `github_repos.py` | Clones repos and opens pull requests |
 | `palmimo.toml` | What the Portal shows and runs |
+| `skills/` | Local voice skills, transcript routing, and client-tool handlers |
+
+Say 「パルミーモに寝て」 or 「パルミーモ、寝て」 to show a SLEEPY yawn
+and play the SDK sleep pose. The app keeps listening; this does not shut it down.
+The sleep skill is registered with the other agent tools on startup, and the
+local transcript parser also triggers it without waiting for an agent tool call.
 
 ## Running on a laptop
 

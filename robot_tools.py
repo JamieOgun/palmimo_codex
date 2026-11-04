@@ -94,7 +94,8 @@ logger = logging.getLogger("robot_tools")
 
 
 def build_toolset(robot: Any) -> AgentToolSet:
-    return AgentToolSet(robot, exclude=EXCLUDED_TOOLS)
+    # Sleep is available internally to the sleep skill, not as a raw agent tool.
+    return AgentToolSet(robot, exclude=tuple(name for name in EXCLUDED_TOOLS if name != "sleep"))
 
 
 def _param(name: str, prop: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +119,8 @@ def client_tool_configs(toolset: AgentToolSet) -> list[dict[str, Any]]:
     """Every tool in *toolset* as an ElevenLabs client tool config."""
     configs = []
     for name, cls in toolset.tool_models.items():
+        if name in EXCLUDED_TOOLS:
+            continue
         schema = cls.parameters_schema()
         properties = {
             key: _param(key, prop) for key, prop in schema.get("properties", {}).items() if key not in HIDDEN_ARGS
